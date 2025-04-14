@@ -14,22 +14,23 @@ for music-transformer, or at https://www.gnu.org/licenses/gpl-3.0.html.
 import torch
 from math import sqrt
 from torch import nn
-from hparams import hparams_large as hparams
-from layers import DecoderLayer, abs_positional_encoding
+from hparams import hparams
+from layers import EncoderLayer, DecoderLayer, abs_positional_encoding
 
 """
-Implementation of Music Transformer model, using torch.nn.TransformerDecoder
-based on Huang et. al, 2018, Vaswani et. al, 2017
+Implementation of Music Transformer model as an encoder-decoder for converting guitar MIDI to bass MIDI.
+Based on Huang et. al, 2018, Vaswani et. al, 2017.
 """
-
 
 class MusicTransformer(nn.Module):
     """
-    Transformer Decoder with Relative Attention. Consists of:
-        1. Input Embedding
-        2. Absolute Positional Encoding
-        3. Stack of N DecoderLayers
-        4. Final Linear Layer
+    Transformer Encoder-Decoder with Relative Attention. Consists of:
+        1. Input Embedding for Guitar (Encoder)
+        2. Input Embedding for Bass (Decoder)
+        3. Absolute Positional Encoding for both
+        4. Stack of N EncoderLayers for Guitar
+        5. Stack of N DecoderLayers for Bass with Cross-Attention
+        6. Final Linear Layer for Bass Prediction
     """
     def __init__(self,
                  d_model=hparams["d_model"],
@@ -38,73 +39,95 @@ class MusicTransformer(nn.Module):
                  d_ff=hparams["d_ff"],
                  max_rel_dist=hparams["max_rel_dist"],
                  max_abs_position=hparams["max_abs_position"],
-                 vocab_size=hparams["vocab_size"],
+                 guitar_vocab_size=hparams["guitar_vocab_size"],  # Vocabulario para guitarra
+                 bass_vocab_size=hparams["bass_vocab_size"],      # Vocabulario para bajo
                  bias=hparams["bias"],
                  dropout=hparams["dropout"],
                  layernorm_eps=hparams["layernorm_eps"]):
         """
         Args:
-            d_model (int): Transformer hidden dimension size
-            num_heads (int): number of heads along which to calculate attention
-            d_ff (int): intermediate dimension of FFN blocks
-            max_rel_dist (int): maximum relative distance between positions to consider in creating
-                                relative position embeddings. Set to 0 to compute normal attention
-            max_abs_position (int): maximum absolute position for which to create sinusoidal absolute
-                                    positional encodings. Set to 0 to compute pure relative attention
-                                    make it greater than the maximum sequence length in the dataset if nonzero
-            bias (bool, optional): if set to False, all Linear layers in the MusicTransformer will not learn
-                                   an additive bias. Default: True
-            dropout (float in [0, 1], optional): dropout rate for training the model. Default: 0.1
-            layernorm_eps (very small float, optional): epsilon for LayerNormalization. Default: 1e-6
+            d_model (int): Tamaño de la dimensión oculta del Transformer.
+            num_layers (int): Número de capas en el encoder y decoder.
+            num_heads (int): Número de cabezas para la atención multi-cabeza.
+            d_ff (int): Dimensión intermedia de las capas FFN.
+            max_rel_dist (int): Distancia relativa máxima para incrustaciones posicionales relativas.
+            max_abs_position (int): Posición absoluta máxima para codificación posicional sinusoidal.
+            guitar_vocab_size (int): Tamaño del vocabulario de guitarra.
+            bass_vocab_size (int): Tamaño del vocabulario de bajo.
+            bias (bool, optional): Si es False, las capas lineales no aprenderán sesgo. Default: True.
+            dropout (float in [0, 1], optional): Tasa de dropout. Default: 0.1.
+            layernorm_eps (float, optional): Epsilon para normalización de capas. Default: 1e-6.
         """
         super(MusicTransformer, self).__init__()
         self.d_model = d_model
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.d_ff = d_ff
-        self.max_rel_dist = max_rel_dist,
+        self.max_rel_dist = max_rel_dist
         self.max_position = max_abs_position
-        self.vocab_size = vocab_size
+        self.guitar_vocab_size = guitar_vocab_size
+        self.bass_vocab_size = bass_vocab_size
 
-        self.input_embedding = nn.Embedding(vocab_size, d_model)
+        # Embedding para la secuencia de guitarra (encoder)
+        self.guitar_embedding = nn.Embedding(guitar_vocab_size, d_model)
+        # Embedding para la secuencia de bajo (decoder)
+        self.bass_embedding = nn.Embedding(bass_vocab_size, d_model)
+        # Codificación posicional absoluta para ambas secuencias
         self.positional_encoding = abs_positional_encoding(max_abs_position, d_model)
+
+        # Dropout para entradas
         self.input_dropout = nn.Dropout(dropout)
 
-        self.decoder = nn.TransformerDecoder(
+        # Encoder: pila de capas EncoderLayer
+        self.encoder = nn.ModuleList([
+            EncoderLayer(d_model=d_model, num_heads=num_heads, d_ff=d_ff, max_rel_dist=max_rel_dist,
+                         bias=bias, dropout=dropout, layernorm_eps=layernorm_eps)
+            for _ in range(num_layers)
+        ])
+
+        # Decoder: pila de capas DecoderLayer con cross-attention
+        self.decoder = nn.ModuleList([
             DecoderLayer(d_model=d_model, num_heads=num_heads, d_ff=d_ff, max_rel_dist=max_rel_dist,
-                         bias=bias, dropout=dropout, layernorm_eps=layernorm_eps),
-            num_layers=num_layers,
-            norm=nn.LayerNorm(normalized_shape=d_model, eps=layernorm_eps)
-        )
+                         bias=bias, dropout=dropout, layernorm_eps=layernorm_eps)
+            for _ in range(num_layers)
+        ])
 
-        self.final = nn.Linear(d_model, vocab_size)
+        # Capa final para proyectar al vocabulario de bajo
+        self.final = nn.Linear(d_model, bass_vocab_size)
 
-    def forward(self, x, mask=None):
+    def forward(self, guitar_seq, bass_seq, guitar_mask=None, bass_mask=None):
         """
-        Forward pass through the Music Transformer. Embeds x according to Vaswani et. al, 2017, adds absolute
-        positional encoding if present, performs dropout, passes through the stack of decoder layers, and
-        projects into the vocabulary space. DOES NOT SOFTMAX OR SAMPLE OUTPUT; OUTPUTS LOGITS.
+        Pase hacia adelante a través del MusicTransformer encoder-decoder.
 
         Args:
-            x (torch.Tensor): input batch of sequences of shape (batch_size, seq_len)
-            mask (optional): mask for input batch indicating positions in x to mask with 1's. Default: None
+            guitar_seq (torch.Tensor): Secuencia MIDI de guitarra de forma (batch_size, seq_len_guitar).
+            bass_seq (torch.Tensor): Secuencia MIDI de bajo parcial de forma (batch_size, seq_len_bass).
+            guitar_mask (optional): Máscara para la secuencia de guitarra con 1's en posiciones a enmascarar.
+            bass_mask (optional): Máscara para la secuencia de bajo con 1's en posiciones a enmascarar.
 
         Returns:
-            input batch after above steps of forward pass through MusicTransformer
+            Logits para la predicción del siguiente token de bajo.
+        
         """
-        # embed x according to Vaswani et. al, 2017
-        x = self.input_embedding(x)
-        x *= sqrt(self.d_model)
 
-        # add absolute positional encoding if max_position > 0, and assuming max_position >> seq_len_x
+        # --- Procesamiento de la secuencia de guitarra (encoder) ---
+        guitar_emb = self.guitar_embedding(guitar_seq) * sqrt(self.d_model)
         if self.max_position > 0:
-            x += self.positional_encoding[:, :x.shape[-2], :]
+            guitar_emb += self.positional_encoding[:, :guitar_emb.shape[1], :]
+        guitar_emb = self.input_dropout(guitar_emb)
 
-        # input dropout
-        x = self.input_dropout(x)
+        memory = guitar_emb
+        for layer in self.encoder:
+            memory = layer(memory, src_mask=guitar_mask)
 
-        # pass through decoder
-        x = self.decoder(x, memory=None, tgt_mask=mask)
+        # --- Procesamiento de la secuencia de bajo (decoder) ---
+        bass_emb = self.bass_embedding(bass_seq) * sqrt(self.d_model)
+        if self.max_position > 0:
+            bass_emb += self.positional_encoding[:, :bass_emb.shape[1], :]
+        bass_emb = self.input_dropout(bass_emb)
 
-        # final projection to vocabulary space
-        return self.final(x)
+        output = bass_emb
+        for layer in self.decoder:
+            output = layer(output, memory, tgt_mask=bass_mask, memory_mask=guitar_mask)  # Añadido memory_mask
+
+        return self.final(output)

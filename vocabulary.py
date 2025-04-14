@@ -55,16 +55,17 @@ velocity_vocab = [f"set_velocity_{i}" for i in range(velocity_events)]
 
 #vocab = ['<pad>'] + note_on_vocab + note_off_vocab + time_shift_vocab + velocity_vocab + ['<start>', '<end>']
 #vocab = ['<pad>', '<guitar>', '<bass>', '<sep>'] + note_on_vocab + note_off_vocab + time_shift_vocab + velocity_vocab + ['<start>', '<end>']
-vocab = ['<pad>'] + note_on_vocab + note_off_vocab + time_shift_vocab + velocity_vocab + ['<start>', '<end>', "<guitar>", "<bass>", "<sep>"]
+#vocab = ['<pad>'] + note_on_vocab + note_off_vocab + time_shift_vocab + velocity_vocab + ['<start>', '<end>', "<guitar>", "<bass>", "<sep>"]
+vocab = ['<pad>'] + note_on_vocab + note_off_vocab + time_shift_vocab + velocity_vocab + ['<start>', '<end>']
 vocab_size = len(vocab)
 
 # useful tokens
 pad_token = vocab.index("<pad>")
 start_token = vocab.index("<start>")
 end_token = vocab.index("<end>")
-guitar_token =  vocab.index("<guitar>")
-bass_token =  vocab.index("<bass>")
-sep_token =  vocab.index("<sep>")
+#guitar_token =  vocab.index("<guitar>")
+#bass_token =  vocab.index("<bass>")
+#sep_token =  vocab.index("<sep>")
 
 
 

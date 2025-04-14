@@ -62,7 +62,7 @@ def create_look_ahead_mask(seq_len):
     return mask.float().to(device)
 
 
-def create_mask(inp, n=4):
+def create_mask(inp, n=4, is_causal=False):
     """
     The correct final mask for the input will be the maximum of the padding and look_ahead mask, as the elements that
     need to be zeroed are represented by 1's, and those that need to be preserved are represented by 0's.
@@ -70,7 +70,7 @@ def create_mask(inp, n=4):
     Args:
         inp: unembedded batch of input sequences of shape (batch_size, seq_len)
         n (int): number of dimensions to which to broadcast mask
-
+        is_causal (bool): Si True, incluye la máscara de look-ahead
     Returns:
         combined_mask: maximum of padding and look_ahead masks for inp;
                        tensor of ones of shape (batch_size, 1, ..., 1, seq_len, seq_len) with ndim=n
@@ -79,9 +79,12 @@ def create_mask(inp, n=4):
     # padding mask
     padding_mask = create_padding_mask(inp, n=n)
 
-    # look ahead mask, assuming seq_len is last dimension of inp
-    look_ahead_mask = create_look_ahead_mask(inp.shape[-1])
+    if is_causal:
+        # look ahead mask, assuming seq_len is last dimension of inp
+        look_ahead_mask = create_look_ahead_mask(inp.shape[-1])
 
-    # final mask is the maximum of the two
-    combined_mask = torch.max(padding_mask, look_ahead_mask)
-    return combined_mask
+        # final mask is the maximum of the two
+        #combined_mask = torch.max(padding_mask, look_ahead_mask)
+        return torch.max(padding_mask, look_ahead_mask)
+    #return combined_mask
+    return padding_mask

@@ -274,32 +274,30 @@ class PointwiseFFN(nn.Module):
         return self.main(x)
 
 
-class DecoderLayer(nn.Module):
+
+
+
+# NUEVA CLASE AGREGADA: EncoderLayer
+class EncoderLayer(nn.Module):
     """
-    Every TransformerDecoder layer consists of 2 sublayers:
-        1. Masked Multi-Head Attention
-        2. Pointwise Feedforward Network
-    In the original Transformer, each sublayer further employs a residual connection followed by a LayerNorm on the last
-    dimension. However, here the LayerNormalization will be placed before the residual connnection, as this Pre-LN
-    architecture does not generally require an explicitly designed learning rate schedule.
+    Capa del encoder para procesar la secuencia de guitarra. Similar a DecoderLayer, pero sin atención enmascarada,
+    ya que el encoder tiene acceso a toda la secuencia de entrada.
     """
     def __init__(self, d_model, num_heads, d_ff, max_rel_dist, bias=True, dropout=0.1, layernorm_eps=1e-6):
         """
         Args:
-            d_model (int): Transformer hidden dimension size
-            num_heads (int): number of heads along which to calculate attention
-            d_ff (int): intermediate dimension of FFN blocks
-            max_rel_dist (int): maximum relative distance between positions to consider in creating
-                                relative position embeddings; set to 0 to compute normal attention
-            bias (bool, optional): if set to False, all Linear layers in the Decoder will not learn
-                                   an additive bias. Default: True
-            dropout (float in [0, 1], optional): dropout rate for training the model
-            layernorm_eps (very small positive float, optional): epsilon for LayerNormalization
+            d_model (int): Tamaño de la dimensión oculta del Transformer.
+            num_heads (int): Número de cabezas para la atención multi-cabeza.
+            d_ff (int): Dimensión intermedia de las capas FFN.
+            max_rel_dist (int): Distancia relativa máxima para las incrustaciones posicionales relativas.
+            bias (bool, optional): Si es False, las capas lineales no aprenderán sesgo. Default: True.
+            dropout (float in [0, 1], optional): Tasa de dropout. Default: 0.1.
+            layernorm_eps (float, optional): Epsilon para la normalización de capas. Default: 1e-6.
         """
-        super(DecoderLayer, self).__init__()
+        super(EncoderLayer, self).__init__()
         self.d_model = d_model
         self.num_heads = num_heads
-        self.max_rel_idst = max_rel_dist
+        self.max_rel_dist = max_rel_dist
 
         self.self_attn = MultiHeadAttention(d_model, num_heads, max_rel_dist, bias)
         self.ffn = PointwiseFFN(d_model, d_ff, bias)
@@ -310,31 +308,95 @@ class DecoderLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, tgt, memory=None, tgt_mask=None,
-                memory_mask=None, tgt_key_padding_mask=None, memory_key_padding_mask=None, 
-                tgt_is_causal=None, memory_is_causal=None):
+    def forward(self, src, src_mask=None):
         """
-        Forward pass through decoder layer. Designed to be able to use torch's nn.TransformerDecoder as the final model,
-        which is why memory and all parameters after tgt_mask are present but are unused.
+        Pase hacia adelante a través de la capa del encoder.
 
         Args:
-            tgt: input queries tensor from previous layer, named this way to use nn.TransformerDecoder
-            tgt_mask (optional, must be explicitly specified as a kwarg): tensor of with 1's indicating positions to
-                                                                          mask. Default: None
+            src: Tensor de entrada (secuencia de guitarra) de forma (batch_size, seq_len_src, d_model).
+            src_mask (optional): Máscara para la secuencia de entrada con 1's en las posiciones a enmascarar.
 
         Returns:
-            output after passing through MHA and FFN blocks, along with intermediate layernorms and residual connections
+            Salida después de pasar por atención multi-cabeza y FFN, con conexiones residuales y normalización.
         """
-        # multi-head attention block
+        # Bloque de atención multi-cabeza
+        attn_out = self.layernorm1(src)
+        attn_out = self.self_attn(attn_out, attn_out, attn_out, mask=src_mask)
+        attn_out = self.dropout1(attn_out)
+        attn_out = src + attn_out
+
+        # Bloque FFN
+        ffn_out = self.layernorm2(attn_out)
+        ffn_out = self.ffn(ffn_out)
+        ffn_out = self.dropout2(ffn_out)
+        ffn_out = ffn_out + attn_out
+
+        return ffn_out
+
+# CLASE MODIFICADA: DecoderLayer
+class DecoderLayer(nn.Module):
+    """
+    Capa del decoder modificada para incluir cross-attention con la salida del encoder, además de la atención
+    enmascarada original para la secuencia de bajo.
+    """
+    def __init__(self, d_model, num_heads, d_ff, max_rel_dist, bias=True, dropout=0.1, layernorm_eps=1e-6):
+        """
+        Args:
+            d_model (int): Tamaño de la dimensión oculta del Transformer.
+            num_heads (int): Número de cabezas para la atención multi-cabeza.
+            d_ff (int): Dimensión intermedia de las capas FFN.
+            max_rel_dist (int): Distancia relativa máxima para las incrustaciones posicionales relativas.
+            bias (bool, optional): Si es False, las capas lineales no aprenderán sesgo. Default: True.
+            dropout (float in [0, 1], optional): Tasa de dropout. Default: 0.1.
+            layernorm_eps (float, optional): Epsilon para la normalización de capas. Default: 1e-6.
+        """
+        super(DecoderLayer, self).__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.max_rel_dist = max_rel_dist
+
+        self.self_attn = MultiHeadAttention(d_model, num_heads, max_rel_dist, bias)
+        self.cross_attn = MultiHeadAttention(d_model, num_heads, max_rel_dist, bias)  # Nueva subcapa de cross-attention
+        self.ffn = PointwiseFFN(d_model, d_ff, bias)
+
+        self.layernorm1 = nn.LayerNorm(normalized_shape=d_model, eps=layernorm_eps)
+        self.layernorm2 = nn.LayerNorm(normalized_shape=d_model, eps=layernorm_eps)
+        self.layernorm3 = nn.LayerNorm(normalized_shape=d_model, eps=layernorm_eps)  # Nueva normalización para cross-attention
+
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)  # Nuevo dropout para cross-attention
+
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None, tgt_key_padding_mask=None, 
+                memory_key_padding_mask=None, tgt_is_causal=None, memory_is_causal=None):
+        """
+        Pase hacia adelante a través de la capa del decoder.
+
+        Args:
+            tgt: Tensor de entrada (secuencia parcial de bajo) de forma (batch_size, seq_len_tgt, d_model).
+            memory: Salida del encoder (secuencia de guitarra procesada) de forma (batch_size, seq_len_src, d_model).
+            tgt_mask (optional): Máscara para la secuencia objetivo con 1's en las posiciones a enmascarar.
+            memory_mask (optional): Máscara para la memoria del encoder.
+
+        Returns:
+            Salida después de pasar por atención enmascarada, cross-attention y FFN, con conexiones residuales y normalización.
+        """
+        # Bloque de atención multi-cabeza enmascarada (self-attention)
         attn_out = self.layernorm1(tgt)
         attn_out = self.self_attn(attn_out, attn_out, attn_out, mask=tgt_mask)
         attn_out = self.dropout1(attn_out)
         attn_out = tgt + attn_out
 
-        # pointwise ffn block
-        ffn_out = self.layernorm2(attn_out)
+        # Bloque de cross-attention con la salida del encoder
+        cross_out = self.layernorm2(attn_out)
+        cross_out = self.cross_attn(cross_out, memory, memory, mask=memory_mask)
+        cross_out = self.dropout2(cross_out)
+        cross_out = attn_out + cross_out
+
+        # Bloque FFN
+        ffn_out = self.layernorm3(cross_out)
         ffn_out = self.ffn(ffn_out)
-        ffn_out = self.dropout2(ffn_out)
-        ffn_out = ffn_out + attn_out
+        ffn_out = self.dropout3(ffn_out)
+        ffn_out = ffn_out + cross_out
 
         return ffn_out

@@ -30,7 +30,6 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Subset
 
 
-from vocabulary import guitar_token, sep_token
 
 """
 Functionality to train a Music Transformer on a single CPU or single GPU
@@ -69,145 +68,16 @@ def transformer_lr_schedule(d_model, step_num, warmup_steps=4000):
 
     return (d_model ** -0.5) * arg
 
+
+
 def loss_fn(prediction, target, criterion=F.cross_entropy):
-    """
-    Since some positions of the input sequences are padded, we must calculate the loss by appropriately masking
-    padding values
+    mask = torch.ne(target, torch.zeros_like(target))  # Máscara para posiciones no acolchadas
+    _loss = criterion(prediction, target, reduction='none')  # Pérdida sin reducción
 
-    Args:
-        prediction: output of the model for some input
-        target: true value the model was supposed to predict
-        criterion: vanilla loss criterion
+    mask = mask.to(_loss.dtype)  # Convertir máscara al tipo de la pérdida
+    _loss *= mask  # Aplicar máscara a la pérdida
 
-    Returns:
-        masked loss between prediction and target
-    """
-    mask = torch.ne(target, torch.zeros_like(target))           # ones where target is 0
-    _loss = criterion(prediction, target, reduction='none')     # loss before masking
-
-    #print("target[0]", target[0])
-    ### Mask guitar sequence
-    guitar_mask = vectorized_guitar_mask(target)
-    #print(f"Shape de guitar_mask: {guitar_mask.shape}")
-    #print(f"Guitar mask[0]: {guitar_mask[0]}")  # Máscara de guitarra para el primer elemento
-
-
-    ### Combined mask
-    mask = mask & guitar_mask
-    #print(f"Shape de mask combinada: {mask.shape}")
-    #print(f"Mask combinada[0]: {mask[0]}")  # Máscara final para el primer elemento
-
-
-
-    masked_target = target[0][mask[0]]
-    #print(f"Target enmascarado[0]: {masked_target}")
-
-    #input("wait")
-
-    # multiply mask to loss elementwise to zero out pad positions
-    mask = mask.to(_loss.dtype)
-    _loss *= mask
-
-    # output is average over the number of values that were not masked
-    return torch.sum(_loss) / torch.sum(mask)
-
-
-def loss_fn_new(prediction, target, criterion=F.cross_entropy):
-    """
-    Since some positions of the input sequences are padded and we want to mask the guitar sequence,
-    we must calculate the loss by appropriately masking padding values and guitar notes.
-
-    Args:
-        prediction: output of the model (shape: [batch_size, seq_len, vocab_size])
-        target: true value the model was supposed to predict (shape: [batch_size, seq_len])
-        guitar_token: valor del token <guitar>
-        sep_token: valor del token <sep>
-        criterion: vanilla loss criterion (default: cross_entropy)
-
-    Returns:
-        masked loss between prediction and target
-    """
-
-    print(f"Shape de prediction: {prediction.shape}")
-    print(f"Shape de target: {target.shape}")
-    print(f"Prediction[0]: {prediction[0]}")  # Primera predicción del batch
-    print(f"Target[0]: {target[0]}")         # Primera secuencia objetivo del batch
-
-
-    # Máscara de padding: True donde target != 0, False en padding
-    padding_mask = torch.ne(target, torch.zeros_like(target))
-
-    print(f"Shape de padding_mask: {padding_mask.shape}")
-    print(f"Padding mask[0]: {padding_mask[0]}")  # Máscara de padding para el primer elemento
-
-
-    # Máscara de guitarra: True donde no son notas de guitarra, False en la secuencia de guitarra
-    guitar_mask = vectorized_guitar_mask(target)
-    print(f"Shape de guitar_mask: {guitar_mask.shape}")
-    print(f"Guitar mask[0]: {guitar_mask[0]}")  # Máscara de guitarra para el primer elemento
-
-
-
-
-    # Combinar máscaras: True solo donde no es padding ni nota de guitarra
-    mask = padding_mask & guitar_mask
-
-    print(f"Shape de mask combinada: {mask.shape}")
-    print(f"Mask combinada[0]: {mask[0]}")  # Máscara final para el primer elemento
-
-
-    # Aplicar la máscara a target para inspeccionar valores válidos
-    masked_target = target[0][mask[0]]
-    print(f"Target enmascarado[0]: {masked_target}")
-
-    input("wait")
-    # Calcular la pérdida sin reducción
-    _loss = criterion(prediction.transpose(1, 2), target, reduction='none')
-
-    # Aplicar la máscara a la pérdida
-    mask = mask.to(_loss.dtype)
-    _loss *= mask
-
-    # Promedio sobre las posiciones no enmascaradas
-    return torch.sum(_loss) / torch.sum(mask)
-
-
-
-
-def vectorized_guitar_mask(target):
-    """
-    Genera una máscara que pone False entre <guitar> y <sep> (excluyéndolos).
-
-    Args:
-        target (torch.Tensor): Tensor de forma [batch_size, seq_len] con las secuencias.
-
-    Returns:
-        torch.Tensor: Máscara booleana de forma [batch_size, seq_len].
-    """
-    batch_size, seq_len = target.shape
-    device = target.device
-
-    # Inicializar la máscara como True
-    mask = torch.ones_like(target, dtype=torch.bool, device=device)
-
-    # Procesar cada secuencia en el batch
-    for i in range(batch_size):
-        seq = target[i]
-        # Encontrar la posición de <guitar> y <sep>
-        guitar_pos = (seq == guitar_token).nonzero(as_tuple=True)[0]
-        sep_pos = (seq == sep_token).nonzero(as_tuple=True)[0]
-
-        # Verificar que ambos tokens existan y que <guitar> esté antes de <sep>
-        if len(guitar_pos) > 0 and len(sep_pos) > 0:
-            idx_guitar = guitar_pos[0].item()  # Primera aparición de <guitar>
-            idx_sep = sep_pos[sep_pos > idx_guitar][0].item() if any(sep_pos > idx_guitar) else seq_len
-
-            # Enmascarar entre idx_guitar + 1 y idx_sep (excluyendo ambos)
-            if idx_guitar + 1 < idx_sep:
-                mask[i, idx_guitar + 1:idx_sep] = False
-
-    return mask
-
+    return torch.sum(_loss) / torch.sum(mask)  # Pérdida promedio sobre posiciones no enmascaradas
 
 
 
@@ -226,11 +96,30 @@ def train_step(model: MusicTransformer, opt, sched, inp, tar):
         loss before current backward pass
     """
     # forward pass
-    predictions = model(inp, mask=create_mask(inp, n=inp.dim() + 2))
+    #predictions = model(inp, mask=create_mask(inp, n=inp.dim() + 2))
+
+    # Secuencia de entrada al encoder (guitarra)
+    guitar_seq = inp
+    guitar_mask = create_mask(guitar_seq, n=guitar_seq.dim() + 2, is_causal=False)  # Solo máscara de padding
+
+    #print("guitar: ",guitar_seq)
+    # Secuencia de entrada al decoder (bajo desplazado)
+    bass_inp = tar[:, :-1]  # Entrada al decoder, sin el último token
+    bass_mask = create_mask(bass_inp, n=bass_inp.dim() + 2, is_causal=True)  # Máscara causal (padding + look-ahead)
+
+    #print("bass: ",bass_inp)
+    # Secuencia objetivo para la pérdida (opcional, dependiendo de tu modelo)
+    bass_tar = tar[:, 1:]  # Salida esperada, sin el primer token
+    #print("bass tar: ",bass_tar)
+
+    #print("wait")
+    # Llamada al modelo
+    predictions = model(guitar_seq, bass_inp, guitar_mask=guitar_mask, bass_mask=bass_mask)
+    #predictions = model(inp, tar, guitar_mask=create_mask(inp, n=inp.dim() + 2),  bass_mask=create_mask(inp, n=tar.dim() + 2, is_casual=True))
 
     # backward pass
     opt.zero_grad()
-    loss = loss_fn(predictions.transpose(-1, -2), tar)
+    loss = loss_fn(predictions.transpose(-1, -2), bass_tar)
     loss.backward()
     opt.step()
     sched.step()
@@ -250,25 +139,46 @@ def val_step(model: MusicTransformer, inp, tar):
     Returns:
         loss of model on input batch
     """
-    predictions = model(inp, mask=create_mask(inp, n=max(inp.dim() + 2, 2)))
-    loss = loss_fn(predictions.transpose(-1, -2), tar)
+
+    # Secuencia de entrada al encoder (guitarra)
+    guitar_seq = inp
+    guitar_mask = create_mask(guitar_seq, n=guitar_seq.dim() + 2, is_causal=False)  # Solo máscara de padding
+
+    # Secuencia de entrada al decoder (bajo desplazado)
+    bass_inp = tar[:, :-1]  # Entrada al decoder, sin el último token
+    bass_mask = create_mask(bass_inp, n=bass_inp.dim() + 2, is_causal=True)  # Máscara causal (padding + look-ahead)
+
+    # Secuencia objetivo para la pérdida (opcional, dependiendo de tu modelo)
+    bass_tar = tar[:, 1:]  # Salida esperada, sin el primer token
+
+    # Llamada al modelo
+    predictions = model(guitar_seq, bass_inp, guitar_mask=guitar_mask, bass_mask=bass_mask)
+
+    #predictions = model(inp, mask=create_mask(inp, n=max(inp.dim() + 2, 2)))
+    loss = loss_fn(predictions.transpose(-1, -2), bass_tar)
     return float(loss)
 
 
 from torch.utils.data import Dataset
 class MMapDataset(Dataset):
     def __init__(self, filepath):
-        self.data = torch.load(filepath, mmap=True)  # Carga con mapeo de memoria
-    
+        self.data = torch.load(filepath, mmap=True, map_location=device)  # Carga con mapeo de memoria
+        print(f"Tamaño del primer tensor: {self.data[0].size()}")
+        print(f"Tamaño del segundo tensor: {self.data[1].size()}")
+        assert self.data[0].size(0) == self.data[1].size(0), "Los tensores de guitarra y bajo deben tener el mismo número de secuencias." 
     def __len__(self):
-        return self.data.size(0)  # Número de muestras
+        return self.data[0].size(0)  # Número de muestras
+        #return len(self.data)
     
     def __getitem__(self, idx):
-        sequence = self.data[idx]  # Obtiene una secuencia
-        input_seq = sequence[:-1]  # Todos los elementos menos el último
-        target_seq = sequence[1:]  # Todos los elementos menos el primero
-        return input_seq, target_seq  # Devuelve tupla (input, target)
-
+        #sequence = self.data[idx]  # Obtiene una secuencia
+        #input_seq = sequence[:-1]  # Todos los elementos menos el último
+        #target_seq = sequence[1:]  # Todos los elementos menos el primero
+        #return input_seq, target_seq  # Devuelve tupla (input, target)
+        #return sequence
+        guitar_seq = self.data[0][idx]  # Secuencia de guitarra en la posición idx
+        bass_seq = self.data[1][idx]    # Secuencia de bajo en la posición idx
+        return guitar_seq, bass_seq     # Devuelve el par (guitar_seq, bass_seq)
 
 class MusicTransformerTrainer:
     """
@@ -290,7 +200,7 @@ class MusicTransformerTrainer:
     """
 
     def __init__(self, hparams_, datapath, batch_size, warmup_steps=4000,
-                 ckpt_path="music_transformer_ckpt.pt", load_from_checkpoint=False):
+                 ckpt_path="music_transformer_ckpt.pt", load_from_checkpoint=False, num_workers=0):
         """
         Args:
             hparams_: hyperparameters of the model
@@ -300,6 +210,7 @@ class MusicTransformerTrainer:
             ckpt_path: path at which to save checkpoints while training; MUST end in .pt or .pth
             load_from_checkpoint (bool, optional): if true, on instantiating the trainer, this will load a previously
                                                    saved checkpoint at ckpt_path
+            num_workers: Number of cores used.
         """
         # get the data
         self.datapath = datapath
@@ -307,8 +218,9 @@ class MusicTransformerTrainer:
         #data = torch.load(datapath).long().to(device)
         dataset = MMapDataset(datapath)
 
-        
+        #print(len(dataset[0])) 
         dataset_size = len(dataset)
+        print("len dataset:", dataset_size)
         subset_size = round(dataset_size * 1)  # 20% del dataset
 
         indices = list(range(dataset_size))
@@ -333,6 +245,7 @@ class MusicTransformerTrainer:
         """
 
         train_len = round(len(dataset) * 0.8)
+        print("train len: ", train_len)
         train_indices = range(train_len)
         val_indices = range(train_len, len(dataset))
 
@@ -347,8 +260,8 @@ class MusicTransformerTrainer:
         #self.val_ds = TensorDataset(val_data[:, :-1], val_data[:, 1:])
         #self.val_dl = DataLoader(dataset=self.val_ds, batch_size=batch_size, shuffle=True)
 
-        self.train_dl = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
-        self.val_dl = DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=True)
+        self.train_dl = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+        self.val_dl = DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
         # create model
         self.model = MusicTransformer(**hparams_).to(device) 
@@ -455,7 +368,7 @@ class MusicTransformerTrainer:
         print("Beginning training...")
         print(time.strftime("%Y-%m-%d %H:%M"))
         #model = torch.compile(self.model)
-        #model = torch.compile(self.model, backend='aot_eager')
+        model = torch.compile(self.model, backend='aot_eager')
         model = self.model.to(device)
         torch.set_float32_matmul_precision("high") # this speeds up traning
 
@@ -471,7 +384,7 @@ class MusicTransformerTrainer:
 
         try:
             for epoch in range(epochs): 
-                torch.mps.empty_cache()
+                #torch.mps.empty_cache()
                 train_epoch_losses = []
                 val_epoch_losses = []
 
@@ -501,8 +414,8 @@ class MusicTransformerTrainer:
                     train_epoch_losses = []
                     with tqdm(total=len(self.train_dl), desc="Training", position=1, leave=False) as train_bar:
                         for train_inp, train_tar in self.train_dl:
-                            train_inp = train_inp.long().to(device)
-                            train_tar = train_tar.long().to(device)
+                            #train_inp = train_inp.long().to(device)
+                            #train_tar = train_tar.long().to(device)
                             loss = train_step(model, self.optimizer, self.scheduler, train_inp, train_tar)
                             train_epoch_losses.append(loss)
                             train_bar.update(1)
@@ -512,8 +425,8 @@ class MusicTransformerTrainer:
                     val_epoch_losses = []
                     with tqdm(total=len(self.val_dl), desc="Validation", position=2, leave=False) as val_bar:
                         for val_inp, val_tar in self.val_dl:
-                            val_inp = val_inp.long().to(device)
-                            val_tar = val_tar.long().to(device)
+                            #val_inp = val_inp.long().to(device)
+                            #val_tar = val_tar.long().to(device)
                             loss = val_step(model, val_inp, val_tar)
                             val_epoch_losses.append(loss)
                             val_bar.update(1)
@@ -561,7 +474,7 @@ class MusicTransformerTrainer:
 
 
 if __name__ == "__main__":
-    from hparams import hparams_large as hparams
+    from hparams import hparams#_large as hparams
 
     def check_positive(x):
         if x is None:
@@ -593,7 +506,8 @@ if __name__ == "__main__":
     parser.add_argument("-w", "--warmup-steps", help="number of warmup steps for transformer learning rate scheduler; "
                                                      "if loading from checkpoint, this will be overwritten by saved "
                                                      "value; default: 4000", type=int)
-
+    parser.add_argument("-j", help="Number of workers", type=int)
+    
     # hyperparameters
     parser.add_argument("-d", "--d-model",
                         help="music transformer hidden dimension size; if loading from checkpoint "
@@ -633,11 +547,15 @@ if __name__ == "__main__":
                         help="epsilon in layernorm layers to avoid zero division; if loading from checkpoint, "
                              "this will be overwritten by saved hparams; default: 1e-6")
 
+
+
     args = parser.parse_args()
 
     # fix optional parameters
     batch_size_ = 32 if args.batch_size is None else args.batch_size
     warmup_steps_ = 2000 if args.warmup_steps is None else args.warmup_steps
+    num_workers_ = 0 if args.j is None else args.j
+    
 
     # fix hyperparameters
     hparams["d_model"] = args.d_model if args.d_model else hparams["d_model"]
@@ -646,15 +564,17 @@ if __name__ == "__main__":
     hparams["d_ff"] = args.d_feedforward if args.d_feedforward else hparams["d_ff"]
     hparams["max_rel_dist"] = args.max_rel_dist if args.max_rel_dist else hparams["max_rel_dist"]
     hparams["max_abs_position"] = args.max_abs_position if args.max_abs_position else hparams["max_abs_position"]
-    hparams["vocab_size"] = args.vocab_size if args.vocab_size else hparams["vocab_size"]
+    hparams["guitar_vocab_size"] = args.vocab_size if args.vocab_size else hparams["guitar_vocab_size"]
+    hparams["bass_vocab_size"] = args.vocab_size if args.vocab_size else hparams["bass_vocab_size"]
     hparams["bias"] = args.no_bias
     hparams["dropout"] = args.dropout if args.dropout else hparams["dropout"]
     hparams["layernorm_eps"] = args.layernorm_eps if args.layernorm_eps else hparams["layernorm_eps"]
 
+
     # set up the trainer
     print("Setting up the trainer...")
     trainer = MusicTransformerTrainer(hparams, args.datapath, batch_size_, warmup_steps_,
-                                      args.ckpt_path, args.load_checkpoint)
+                                      args.ckpt_path, args.load_checkpoint, num_workers_)
     print()
 
     # train the model
