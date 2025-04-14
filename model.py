@@ -14,7 +14,7 @@ for music-transformer, or at https://www.gnu.org/licenses/gpl-3.0.html.
 import torch
 from math import sqrt
 from torch import nn
-from hparams import hparams
+from hparams import hparams_large as hparams
 from layers import DecoderLayer, abs_positional_encoding
 
 """

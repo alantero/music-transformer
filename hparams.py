@@ -17,6 +17,8 @@ from vocabulary import vocab_size
 # get device
 if torch.backends.cuda.is_built():
     dev = "cuda:0"
+elif torch.backends.mps.is_available():
+    dev = "mps"
 else:
     dev = "cpu"
 device = d(dev)
