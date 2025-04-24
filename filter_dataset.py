@@ -67,7 +67,7 @@ def get_unique_filepaths(dataset_dir):
 
             print("Hola", total_midi_files)
             # Paso 2: Calcular cuántos archivos representan el 10%
-            num_files_to_select = math.ceil(total_midi_files * 0.13)
+            num_files_to_select = math.ceil(total_midi_files * 1)
             
             # Paso 3: Seleccionar solo el número necesario de archivos
             selected_files = []

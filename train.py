@@ -21,6 +21,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from hparams import device
 from masking import create_mask
 from model import MusicTransformer
+from vocabulary import pad_token
+
+
 
 import shutil
 from tqdm import tqdm
@@ -28,7 +31,7 @@ import torch._dynamo
 torch._dynamo.config.suppress_errors = True  # Esto forzara la ejecucion en modo eager si Dynamo falla.
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Subset
-
+from torch.utils.data import Dataset, random_split
 
 
 """
@@ -71,14 +74,14 @@ def transformer_lr_schedule(d_model, step_num, warmup_steps=4000):
 
 
 def loss_fn(prediction, target, criterion=F.cross_entropy):
-    mask = torch.ne(target, torch.zeros_like(target))  # Máscara para posiciones no acolchadas
-    _loss = criterion(prediction, target, reduction='none')  # Pérdida sin reducción
+    #mask = torch.ne(target, torch.zeros_like(target))  # Máscara para posiciones no acolchadas
+    #_loss = criterion(prediction, target, reduction='none')  # Pérdida sin reducción
 
-    mask = mask.to(_loss.dtype)  # Convertir máscara al tipo de la pérdida
-    _loss *= mask  # Aplicar máscara a la pérdida
+    #mask = mask.to(_loss.dtype)  # Convertir máscara al tipo de la pérdida
+    #_loss *= mask  # Aplicar máscara a la pérdida
 
-    return torch.sum(_loss) / torch.sum(mask)  # Pérdida promedio sobre posiciones no enmascaradas
-
+    #return torch.sum(_loss) / torch.sum(mask)  # Pérdida promedio sobre posiciones no enmascaradas
+    return criterion(prediction, target, ignore_index=pad_token)
 
 
 def train_step(model: MusicTransformer, opt, sched, inp, tar):
@@ -108,6 +111,7 @@ def train_step(model: MusicTransformer, opt, sched, inp, tar):
     bass_mask = create_mask(bass_inp, n=bass_inp.dim() + 2, is_causal=True)  # Máscara causal (padding + look-ahead)
 
     #print("bass: ",bass_inp)
+    #print("bass mask: ",bass_mask)
     # Secuencia objetivo para la pérdida (opcional, dependiendo de tu modelo)
     bass_tar = tar[:, 1:]  # Salida esperada, sin el primer token
     #print("bass tar: ",bass_tar)
@@ -115,7 +119,6 @@ def train_step(model: MusicTransformer, opt, sched, inp, tar):
     #print("wait")
     # Llamada al modelo
     predictions = model(guitar_seq, bass_inp, guitar_mask=guitar_mask, bass_mask=bass_mask)
-    #predictions = model(inp, tar, guitar_mask=create_mask(inp, n=inp.dim() + 2),  bass_mask=create_mask(inp, n=tar.dim() + 2, is_casual=True))
 
     # backward pass
     opt.zero_grad()
@@ -143,11 +146,15 @@ def val_step(model: MusicTransformer, inp, tar):
     # Secuencia de entrada al encoder (guitarra)
     guitar_seq = inp
     guitar_mask = create_mask(guitar_seq, n=guitar_seq.dim() + 2, is_causal=False)  # Solo máscara de padding
+    #print("guitar: ",guitar_seq[0])
 
     # Secuencia de entrada al decoder (bajo desplazado)
     bass_inp = tar[:, :-1]  # Entrada al decoder, sin el último token
     bass_mask = create_mask(bass_inp, n=bass_inp.dim() + 2, is_causal=True)  # Máscara causal (padding + look-ahead)
 
+    #print("bass: ",bass_inp[0])
+    #print("bass mask: ",bass_mask[0])
+    #print(bass_inp[0][bass_mask[0][-1]])
     # Secuencia objetivo para la pérdida (opcional, dependiendo de tu modelo)
     bass_tar = tar[:, 1:]  # Salida esperada, sin el primer token
 
@@ -159,9 +166,8 @@ def val_step(model: MusicTransformer, inp, tar):
     return float(loss)
 
 
-from torch.utils.data import Dataset
 class MMapDataset(Dataset):
-    def __init__(self, filepath):
+    def __init__(self, filepath, min_length=20):
         self.data = torch.load(filepath, mmap=True, map_location=device)  # Carga con mapeo de memoria
         print(f"Tamaño del primer tensor: {self.data[0].size()}")
         print(f"Tamaño del segundo tensor: {self.data[1].size()}")
@@ -179,6 +185,29 @@ class MMapDataset(Dataset):
         guitar_seq = self.data[0][idx]  # Secuencia de guitarra en la posición idx
         bass_seq = self.data[1][idx]    # Secuencia de bajo en la posición idx
         return guitar_seq, bass_seq     # Devuelve el par (guitar_seq, bass_seq)
+
+
+class FilteredDataset(Dataset):
+    def __init__(self, dataset, min_length=20):
+        self.dataset = dataset
+        self.min_length = min_length
+        # Filtra índices donde la longitud efectiva sea >= min_length
+        self.indices = [i for i in range(len(dataset)) if self._get_length(i) >= min_length]
+
+    def _get_length(self, idx):
+        guitar_seq, bass_seq = self.dataset[idx]
+        # Calcula la longitud hasta el primer token de fin (<end>), ajusta según tu tokenización
+        end_token = 1  # Cambia este valor según tu vocabulario
+        guitar_len = (guitar_seq == end_token).nonzero(as_tuple=True)[0][0].item() + 1 if (guitar_seq == end_token).any() else guitar_seq.size(0)
+        bass_len = (bass_seq == end_token).nonzero(as_tuple=True)[0][0].item() + 1 if (bass_seq == end_token).any() else bass_seq.size(0)
+        return min(guitar_len, bass_len)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        return self.dataset[self.indices[idx]]
+
 
 class MusicTransformerTrainer:
     """
@@ -212,21 +241,31 @@ class MusicTransformerTrainer:
                                                    saved checkpoint at ckpt_path
             num_workers: Number of cores used.
         """
+
+
+        seed = 42  # Semilla fija para reproducibilidad
+
+        # Establecer la semilla para reproducibilidad
+        torch.manual_seed(seed)
+
+
         # get the data
         self.datapath = datapath
         self.batch_size = batch_size
         #data = torch.load(datapath).long().to(device)
         dataset = MMapDataset(datapath)
-
+        #dataset = FilteredDataset(dataset, min_length=20)
+        #print(f"Nuevo tamaño del dataset filtrado: {len(filtered_dataset)}")
         #print(len(dataset[0])) 
         dataset_size = len(dataset)
         print("len dataset:", dataset_size)
-        subset_size = round(dataset_size * 1)  # 20% del dataset
+        subset_size = round(dataset_size * 0.3)  # 20% del dataset
 
         indices = list(range(dataset_size))
         subset_indices = indices[:subset_size]
 
-        dataset = Subset(dataset, subset_indices)
+        #dataset = Subset(dataset, subset_indices)
+        dataset, _ = random_split(dataset, [subset_size, len(dataset) - subset_size])
 
         # max absolute position must be able to acount for the largest sequence in the data
         sequence_length = dataset[0][0].shape[-1]  # Longitud de input_seq
@@ -235,15 +274,7 @@ class MusicTransformerTrainer:
             hparams_["max_abs_position"] = max(hparams_["max_abs_position"], sequence_length)
 
 
-        """
-        # train / validation split: 80 / 20
-        train_len = round(data.shape[0] * 0.8)
-        train_data = data[:train_len]
-        val_data = data[train_len:]
-        print(f"There are {data.shape[0]} samples in the data, {len(train_data)} training samples and {len(val_data)} "
-              "validation samples")
-        """
-
+        ### Split training-validation
         train_len = round(len(dataset) * 0.8)
         print("train len: ", train_len)
         train_indices = range(train_len)
@@ -252,13 +283,6 @@ class MusicTransformerTrainer:
         train_dataset = Subset(dataset, train_indices)
         val_dataset = Subset(dataset, val_indices)
 
-
-        # datasets and dataloaders: split data into first (n-1) and last (n-1) tokens
-        #self.train_ds = TensorDataset(train_data[:, :-1], train_data[:, 1:])
-        #self.train_dl = DataLoader(dataset=self.train_ds, batch_size=batch_size, shuffle=True)
-
-        #self.val_ds = TensorDataset(val_data[:, :-1], val_data[:, 1:])
-        #self.val_dl = DataLoader(dataset=self.val_ds, batch_size=batch_size, shuffle=True)
 
         self.train_dl = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
         self.val_dl = DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
@@ -373,7 +397,7 @@ class MusicTransformerTrainer:
         torch.set_float32_matmul_precision("high") # this speeds up traning
 
         # Setup TensorBoard logging
-        log_dir = os.path.join("logs/", "BassTransformer/")
+        log_dir = os.path.join("logs/", self.ckpt_path.split(".")[0]+"/")
         if os.path.exists(log_dir):
             shutil.rmtree(log_dir)
         writer = SummaryWriter(log_dir=log_dir)
@@ -474,7 +498,7 @@ class MusicTransformerTrainer:
 
 
 if __name__ == "__main__":
-    from hparams import hparams#_large as hparams
+    from hparams import hparams2 as hparams#_large as hparams
 
     def check_positive(x):
         if x is None:

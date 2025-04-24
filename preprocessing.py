@@ -122,7 +122,7 @@ def count_notes_in_interval(instrument, start, end):
     """
     return sum(1 for note in instrument.notes if note.start < end and note.end > start)
 
-def create_filtered_track(instrument, start, end):
+def create_filtered_track_inter(instrument, start, end):
     """
     Crea un instrumento pretty_midi filtrado con notas dentro de un intervalo.
     Args:
@@ -174,109 +174,7 @@ def get_instrument_tracks(midi_file, variants):
     return [instr for instr in midi_file.instruments if any(variant in instr.name.lower() for variant in variants)]
 
 
-def process_midi_file_old(filepath, min_seg_duration=0.1, max_seg_duration=30.0, max_tokens=1000):
-    """
-    Procesa un archivo MIDI y genera secuencias de tokens para guitarra y bajo.
-    Asegura que al inicio las notas hayan comenzado y al final hayan terminado.
-
-    Args:
-        filepath (str): Ruta al archivo MIDI.
-        min_seg_duration (float): Duración mínima (en segundos) para considerar un segmento.
-        max_seg_duration (float): Duración máxima inicial de las ventanas (en segundos).
-        max_tokens (int): Número máximo de tokens permitidos por secuencia.
-    Returns:
-        Lista de secuencias de índices de tokens.
-    """
-    token_sequences = []
-
-    # Cargar el archivo MIDI con pretty_midi
-    try:
-        midi_file = pretty_midi.PrettyMIDI(filepath)
-    except Exception as e:
-        print(f"Error cargando {filepath}: {e}")
-        return token_sequences
-
-    # Identificar instrumentos de guitarra y bajo
-    guitar_instruments = get_instrument_tracks(midi_file, guitar_variants)
-    bass_instruments = get_instrument_tracks(midi_file, bass_variants)
-
-    if not guitar_instruments or not bass_instruments:
-        return token_sequences
-
-    # Seleccionar la guitarra y el bajo con más notas
-    selected_guitar = max(guitar_instruments, key=lambda instr: len(instr.notes))
-    selected_bass = max(bass_instruments, key=lambda instr: len(instr.notes))
-
-    # Obtener la duración total de la canción
-    total_duration = midi_file.get_end_time()
-
-    # Función auxiliar para procesar un segmento
-    def process_segment(start, duration):
-        end = min(start + duration, total_duration)
-        if end - start < min_seg_duration:
-            return []
-
-        # Filtrar notas de guitarra y bajo que hayan comenzado antes o en el inicio del segmento
-        # y ajustar las que terminan después del segmento
-        guitar_notes = [
-            note for note in selected_guitar.notes 
-            if note.start <= start and note.end > start
-        ] + [
-            note for note in selected_guitar.notes 
-            if note.start > start and note.end <= end
-        ]
-        bass_notes = [
-            note for note in selected_bass.notes 
-            if note.start <= start and note.end > start
-        ] + [
-            note for note in selected_bass.notes 
-            if note.start > start and note.end <= end
-        ]
-
-        # Verificar si hay notas válidas para ambos instrumentos
-        if not guitar_notes or not bass_notes:
-            return []
-
-        # Crear instrumentos filtrados con notas ajustadas
-        guitar_filtered = create_filtered_track(selected_guitar, start, end, guitar_notes)
-        bass_filtered = create_filtered_track(selected_bass, start, end, bass_notes)
-
-        # Crear objetos PrettyMIDI para tokenización
-        guitar_midi = pretty_midi.PrettyMIDI()
-        guitar_midi.instruments.append(guitar_filtered)
-        bass_midi = pretty_midi.PrettyMIDI()
-        bass_midi.instruments.append(bass_filtered)
-
-        # Tokenizar
-        _, guitar_events, _ = midi_parser(mid=guitar_midi, instrument="guitar")
-        _, bass_events, _ = midi_parser(mid=bass_midi, instrument="bass")
-
-        # Combinar eventos
-        combined_events = guitar_events + ["<sep>"] + bass_events
-        combined_indices = events_to_indices(combined_events)
-
-        # Verificar longitud
-        if len(combined_indices) > max_tokens:
-            half_duration = duration / 2
-            sub_sequences = []
-            sub_sequences.extend(process_segment(start, half_duration))
-            sub_sequences.extend(process_segment(start + half_duration, half_duration))
-            return sub_sequences
-        else:
-            return [combined_indices]
-
-    # Dividir en ventanas de max_seg_duration
-    for start in range(0, int(total_duration), int(max_seg_duration)):
-        segment_sequences = process_segment(start, max_seg_duration)
-        token_sequences.extend(segment_sequences)
-
-    return token_sequences
-
-
-
-
-
-def process_midi_file(filepath, min_seg_duration=0.1, max_seg_duration=30.0, max_tokens=1000):
+def process_midi_file_old(filepath, min_seg_duration=5, max_seg_duration=30.0, max_tokens=1000):
     """
     Procesa un archivo MIDI y genera pares de secuencias de tokens para guitarra (entrada) y bajo (salida).
     Cada secuencia comienza con <start> y termina con <end>.
@@ -349,6 +247,18 @@ def process_midi_file(filepath, min_seg_duration=0.1, max_seg_duration=30.0, max
         bass_midi = pretty_midi.PrettyMIDI()
         bass_midi.instruments.append(bass_filtered)
 
+
+        if False:
+            # Create a new PrettyMIDI object for the combined MIDI file
+            combined_midi = pretty_midi.PrettyMIDI()
+            # Append the guitar filtered instrument
+            combined_midi.instruments.append(guitar_filtered)
+            # Append the bass filtered instrument
+            combined_midi.instruments.append(bass_filtered)
+            # Write the combined MIDI file
+            combined_midi.write('combined_output.mid')
+            #input("wait")
+
         # Tokenizar
         _, guitar_events, _ = midi_parser(mid=guitar_midi, instrument="guitar")
         _, bass_events, _ = midi_parser(mid=bass_midi, instrument="bass")
@@ -385,7 +295,251 @@ def process_midi_file(filepath, min_seg_duration=0.1, max_seg_duration=30.0, max
 
 
 
-def create_filtered_track(instrument, start, end, notes):
+
+
+
+def process_midi_file_inter(filepath, min_seg_duration=5, max_seg_duration=30.0, max_tokens=1000, min_overlap_ratio=0.2):
+    """
+    Procesa un archivo MIDI y genera pares de secuencias de tokens para guitarra y bajo,
+    asegurando que ambos instrumentos estén presentes en cada segmento.
+
+    Args:
+        filepath (str): Ruta al archivo MIDI.
+        min_seg_duration (float): Duración mínima de un segmento (segundos).
+        max_seg_duration (float): Duración máxima de un segmento (segundos).
+        max_tokens (int): Número máximo de tokens por secuencia.
+        min_overlap_ratio (float): Proporción mínima de superposición requerida.
+    Returns:
+        Lista de pares (secuencia_guitarra, secuencia_bajo).
+    """
+    token_pairs = []
+
+    try:
+        midi_file = pretty_midi.PrettyMIDI(filepath)
+    except Exception as e:
+        print(f"Error cargando {filepath}: {e}")
+        return token_pairs
+
+    guitar_instruments = get_instrument_tracks(midi_file, guitar_variants)
+    bass_instruments = get_instrument_tracks(midi_file, bass_variants)
+
+    if not guitar_instruments or not bass_instruments:
+        return token_pairs
+
+    selected_guitar = max(guitar_instruments, key=lambda instr: len(instr.notes))
+    selected_bass = max(bass_instruments, key=lambda instr: len(instr.notes))
+
+    total_duration = midi_file.get_end_time()
+
+    # Obtener intervalos superpuestos
+    guitar_intervals = merge_intervals(get_note_intervals(selected_guitar))
+    bass_intervals = merge_intervals(get_note_intervals(selected_bass))
+    overlapping_intervals = intersect_intervals(guitar_intervals, bass_intervals)
+
+    if not overlapping_intervals:
+        return token_pairs
+
+    def process_segment(start, duration):
+        end = min(start + duration, total_duration)
+        if end - start < min_seg_duration:
+            return []
+
+        # Asegurar superposición suficiente
+        overlap_duration = sum(min(end, o_end) - max(start, o_start)
+                              for o_start, o_end in overlapping_intervals
+                              if o_start < end and o_end > start)
+        if overlap_duration / (end - start) < min_overlap_ratio:
+            return []
+
+        guitar_notes = [note for note in selected_guitar.notes if note.start < end and note.end > start]
+        bass_notes = [note for note in selected_bass.notes if note.start < end and note.end > start]
+
+        if not guitar_notes or not bass_notes:
+            return []
+
+        guitar_filtered = create_filtered_track(selected_guitar, start, end)
+        bass_filtered = create_filtered_track(selected_bass, start, end)
+
+        guitar_midi = pretty_midi.PrettyMIDI()
+        guitar_midi.instruments.append(guitar_filtered)
+        bass_midi = pretty_midi.PrettyMIDI()
+        bass_midi.instruments.append(bass_filtered)
+
+        if False:#True:
+            # Create a new PrettyMIDI object for the combined MIDI file
+            combined_midi = pretty_midi.PrettyMIDI()
+            # Append the guitar filtered instrument
+            combined_midi.instruments.append(guitar_filtered)
+            # Append the bass filtered instrument
+            combined_midi.instruments.append(bass_filtered)
+            # Write the combined MIDI file
+            combined_midi.write('combined_output.mid')
+            #input("wait")
+
+
+
+
+        # Tokenización (simulada, ajustar según implementación real)
+        _, guitar_events, _ = midi_parser(mid=guitar_midi, instrument="guitar")
+        _, bass_events, _ = midi_parser(mid=bass_midi, instrument="bass")
+
+        guitar_seq = ["<start>"] + guitar_events + ["<end>"]
+        bass_seq = ["<start>"] + bass_events + ["<end>"]
+
+        #print("---------------------")
+        #print(guitar_seq)
+        #print(bass_seq)
+
+
+        guitar_indices = events_to_indices(guitar_seq)
+        bass_indices = events_to_indices(bass_seq)
+
+        # Balancear tokens
+        if abs(len(guitar_indices) - len(bass_indices)) / max(len(guitar_indices), len(bass_indices)) > 0.2:
+            half_duration = duration / 2
+            return (process_segment(start, half_duration) +
+                    process_segment(start + half_duration, half_duration))
+
+        if len(guitar_indices) > max_tokens or len(bass_indices) > max_tokens:
+            half_duration = duration / 2
+            return (process_segment(start, half_duration) +
+                    process_segment(start + half_duration, half_duration))
+
+        return [(guitar_indices, bass_indices)]
+
+    # Procesar cada intervalo superpuesto
+    #for start, end in overlapping_intervals:
+    #    duration = min(end - start, max_seg_duration)
+    #    if duration >= min_seg_duration:
+    #        segment_pairs = process_segment(start, duration)
+    #        token_pairs.extend(segment_pairs)
+
+    # Process every overlapping interval -------------------------------------
+    for start, end in overlapping_intervals:
+        current = start
+        while current < end:
+            # segment_len can be shorter than max_seg_duration at the tail end
+            segment_len = min(max_seg_duration, end - current)
+            if segment_len >= min_seg_duration:
+                segment_pairs = process_segment(current, segment_len)
+                token_pairs.extend(segment_pairs)
+            # advance; use segment_len as stride (no overlap). 
+            # If you want overlapping windows, move less than segment_len.
+            current += segment_len
+
+    return token_pairs
+
+
+
+def process_midi_file(filepath, min_seg_duration=5, max_seg_duration=30.0, max_tokens=1000, stride=10.0):
+    """
+    Procesa un archivo MIDI y genera pares de secuencias de tokens para guitarra y bajo,
+    maximizando el número de segmentos con superposición de instrumentos.
+
+    Args:
+        filepath (str): Ruta al archivo MIDI.
+        min_seg_duration (float): Duración mínima de un segmento (segundos).
+        max_seg_duration (float): Duración máxima de un segmento (segundos).
+        max_tokens (int): Número máximo de tokens por secuencia.
+        stride (float): Paso entre segmentos para ventanas deslizantes (segundos).
+    Returns:
+        Lista de pares (secuencia_guitarra, secuencia_bajo).
+    """
+    token_pairs = []
+
+    try:
+        midi_file = pretty_midi.PrettyMIDI(filepath)
+    except Exception as e:
+        print(f"Error cargando {filepath}: {e}")
+        return token_pairs
+
+    guitar_instruments = get_instrument_tracks(midi_file, guitar_variants)
+    bass_instruments = get_instrument_tracks(midi_file, bass_variants)
+
+    if not guitar_instruments or not bass_instruments:
+        return token_pairs
+
+    selected_guitar = max(guitar_instruments, key=lambda instr: len(instr.notes))
+    selected_bass = max(bass_instruments, key=lambda instr: len(instr.notes))
+
+    total_duration = midi_file.get_end_time()
+
+    def process_segment(start, duration):
+        end = min(start + duration, total_duration)
+        if end - start < min_seg_duration:
+            return []
+
+        # Filtrar notas que se solapan con el intervalo
+        guitar_notes = [note for note in selected_guitar.notes if note.start < end and note.end > start]
+        bass_notes = [note for note in selected_bass.notes if note.start < end and note.end > start]
+
+        if not guitar_notes or not bass_notes:
+            return []
+
+        guitar_filtered = create_filtered_track(selected_guitar, start, end)
+        bass_filtered = create_filtered_track(selected_bass, start, end)
+
+        guitar_midi = pretty_midi.PrettyMIDI()
+        guitar_midi.instruments.append(guitar_filtered)
+        bass_midi = pretty_midi.PrettyMIDI()
+        bass_midi.instruments.append(bass_filtered)
+
+        _, guitar_events, _ = midi_parser(mid=guitar_midi, instrument="guitar")
+        _, bass_events, _ = midi_parser(mid=bass_midi, instrument="bass")
+
+        guitar_seq = ["<start>"] + guitar_events + ["<end>"]
+        bass_seq = ["<start>"] + bass_events + ["<end>"]
+
+        guitar_indices = events_to_indices(guitar_seq)
+        bass_indices = events_to_indices(bass_seq)
+
+        if len(guitar_indices) > max_tokens or len(bass_indices) > max_tokens:
+            half_duration = duration / 2
+            return (process_segment(start, half_duration) +
+                    process_segment(start + half_duration, half_duration))
+
+        return [(guitar_indices, bass_indices)]
+
+    # Usar ventanas deslizantes con stride
+    current = 0.0
+    while current < total_duration:
+        segment_pairs = process_segment(current, max_seg_duration)
+        token_pairs.extend(segment_pairs)
+        current += stride  # Avanzar por stride segundos
+
+    return token_pairs
+
+def create_filtered_track(instrument, start, end):
+    """
+    Crea un instrumento filtrado con notas dentro de un intervalo, ajustando tiempos relativos.
+
+    Args:
+        instrument (pretty_midi.Instrument): Instrumento original.
+        start (float): Tiempo de inicio del intervalo (segundos).
+        end (float): Tiempo de fin del intervalo (segundos).
+    Returns:
+        pretty_midi.Instrument: Instrumento filtrado con tiempos ajustados.
+    """
+    filtered_instrument = pretty_midi.Instrument(program=instrument.program, is_drum=instrument.is_drum, name=instrument.name)
+    for note in instrument.notes:
+        if note.start < end and note.end > start:
+            filtered_start = max(0, note.start - start)
+            filtered_end = min(end - start, note.end - start)
+            filtered_note = pretty_midi.Note(
+                velocity=note.velocity,
+                pitch=note.pitch,
+                start=filtered_start,
+                end=filtered_end
+            )
+            filtered_instrument.notes.append(filtered_note)
+    return filtered_instrument
+
+
+
+
+
+
+def create_filtered_track_old(instrument, start, end, notes):
     """
     Crea un instrumento filtrado ajustando notas al intervalo.
     - Si una nota comienza antes de 'start', ajusta su inicio a 'start'.
@@ -550,7 +704,8 @@ if __name__ == "__main__":
     if not args.from_augmented_data:
         print("Translating midi files to event vocabulary (NOTE: may take a while)...") if args.verbose else None
         #midi_files = list(glob.iglob(PATH + '**/*.mid*', recursive=True))#[0:10]
-        with open("valid_metal_full_files.csv", newline='', encoding="utf-8") as csvfile:
+        #with open("valid_metal_full_files.csv", newline='', encoding="utf-8") as csvfile:
+        with open("valid_reduced_files.csv", newline='', encoding="utf-8") as csvfile:
             reader = csv.DictReader(csvfile)
             midi_files = [row["filepath"] for row in reader]
         with ProcessPoolExecutor(max_workers=8) as executor:

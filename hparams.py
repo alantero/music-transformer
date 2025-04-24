@@ -40,31 +40,36 @@ hparams = {
 }
 
 
-"""
-hparams = {
-    "d_model": 128,
-    "num_layers": 3,
-    "num_heads": 8,
-    "d_ff": 512,
-    "max_rel_dist": 1024,
-    "max_abs_position": 0,
-    "vocab_size": vocab_size,
-    "bias": True,
-    "dropout": 0.1,
-    "layernorm_eps": 1e-6
+# Default hparams for the new encoder-decoder Music Transformer model
+hparams1 = {
+    "d_model": 256,             # Tamaño de la dimensión oculta del modelo
+    "num_layers": 4,            # Número de capas en el encoder y decoder
+    "num_heads": 8,             # Número de cabezas para la atención multi-cabeza
+    "d_ff": 512,                # Dimensión intermedia de las capas FFN
+    "max_rel_dist": 1024,       # Distancia relativa máxima para incrustaciones posicionales relativas
+    "max_abs_position": 0,    # Máxima posición absoluta para codificación posicional (ajustada para 512 tokens)
+    "guitar_vocab_size": vocab_size,   # Tamaño del vocabulario para la guitarra (entrada)
+    "bass_vocab_size": vocab_size,     # Tamaño del vocabulario para el bajo (salida)
+    "bias": True,               # Si las capas lineales aprenderán sesgo
+    "dropout": 0.1,             # Tasa de dropout
+    "layernorm_eps": 1e-6       # Epsilon para normalización de capas
 }
 
-# hparams for TF model - significantly larger
-hparams_large = {
-    "d_model": 256,
-    "num_layers": 6,
-    "num_heads": 8,
-    "d_ff": 1024,
-    "max_rel_dist": 1024,
-    "max_abs_position": 0,
-    "vocab_size": vocab_size,
-    "bias": True,
-    "dropout": 0.1,
-    "layernorm_eps": 1e-6
+
+
+# Default hparams for the new encoder-decoder Music Transformer model
+hparams2 = {
+    "d_model": 256,             # Tamaño de la dimensión oculta del modelo
+    "num_layers": 6,            # Número de capas en el encoder y decoder
+    "num_heads": 8,             # Número de cabezas para la atención multi-cabeza
+    "d_ff": 512,                # Dimensión intermedia de las capas FFN
+    "max_rel_dist": 1024,       # Distancia relativa máxima para incrustaciones posicionales relativas
+    "max_abs_position": 0,    # Máxima posición absoluta para codificación posicional (ajustada para 512 tokens)
+    "guitar_vocab_size": vocab_size,   # Tamaño del vocabulario para la guitarra (entrada)
+    "bass_vocab_size": vocab_size,     # Tamaño del vocabulario para el bajo (salida)
+    "bias": True,               # Si las capas lineales aprenderán sesgo
+    "dropout": 0.1,             # Tasa de dropout
+    "layernorm_eps": 1e-6       # Epsilon para normalización de capas
 }
-"""
+
+
